@@ -177,12 +177,6 @@ static int hm_format_sql(himysql_t *hm, const char *format, va_list ap)
                     size_t _l = 0;
                     va_list _ap;
 
-                    int _int;
-                    long _long;
-                    long long _llong;
-                    double _double;
-                    size_t _size;
-
                     /* Flags */
                     if (*_f != '\0' && *_f == '#') ++_f;
                     if (*_f != '\0' && *_f == '0') ++_f;
@@ -206,14 +200,14 @@ static int hm_format_sql(himysql_t *hm, const char *format, va_list ap)
                     /* Integer conversion */
                     if (strchr(int_fmts, *_f) != NULL)
                     {
-                        _int = va_arg(ap, int);
+                        va_arg(ap, int);
                         goto fmt_valid_lable;
                     }
 
                     /* Double  conversion */
                     if (strchr("eEfFgGaA", *_f) != NULL)
                     {
-                        _double = va_arg(ap, double);
+                        va_arg(ap, double);
                         goto fmt_valid_lable;
                     }
 
@@ -223,7 +217,7 @@ static int hm_format_sql(himysql_t *hm, const char *format, va_list ap)
                         _f += 2;
                         if (*_f != '\0' && strchr(int_fmts, *_f) != NULL)
                         {
-                            _int = va_arg(ap, int); /* char gets promoted to int */
+                            va_arg(ap, int); /* char gets promoted to int */
                             goto fmt_valid_lable;
                         }
                         goto fmt_invalid_lable;
@@ -235,7 +229,7 @@ static int hm_format_sql(himysql_t *hm, const char *format, va_list ap)
                         _f += 1;
                         if (*_f != '\0' && strchr(int_fmts, *_f) != NULL)
                         {
-                            _int = va_arg(ap, int); /* short gets promoted to int */
+                            va_arg(ap, int); /* short gets promoted to int */
                             goto fmt_valid_lable;
                         }
                         goto fmt_invalid_lable;
@@ -247,7 +241,7 @@ static int hm_format_sql(himysql_t *hm, const char *format, va_list ap)
                         _f += 2;
                         if (*f != '\0' && strchr(int_fmts, *_f) != NULL)
                         {
-                            _llong = va_arg(ap, long long);
+                            va_arg(ap, long long);
                             goto fmt_valid_lable;
                         }
                         goto fmt_invalid_lable;
@@ -259,7 +253,7 @@ static int hm_format_sql(himysql_t *hm, const char *format, va_list ap)
                         _f += 1;
                         if (*_f != '\0' && strchr(int_fmts, *_f) != NULL)
                         {
-                            _long = va_arg(ap, long);
+                            va_arg(ap, long);
                             goto fmt_valid_lable;
                         }
                         goto fmt_invalid_lable;
@@ -271,7 +265,7 @@ static int hm_format_sql(himysql_t *hm, const char *format, va_list ap)
                         _f += 1;
                         if (*_f != '\0' && strchr(int_fmts, *_f) != NULL)
                         {
-                            _size = va_arg(ap, size_t);
+                            va_arg(ap, size_t);
                             goto fmt_valid_lable;
                         }
                         goto fmt_invalid_lable;
@@ -318,7 +312,6 @@ fmt_valid_lable:
 
 typedef struct list_node
 {
-    struct list_node *prev;
     struct list_node *next;
     size_t size;
     char value[];
@@ -342,18 +335,16 @@ static int list_add_tail(list *list, const void *value, size_t size, size_t max)
     if (node == NULL)
         return HM_ERROR;
 
+    node->next = NULL;
     node->size = size;
     memcpy(node->value, value, size);
 
     if (list->len == 0)
     {
         list->head = list->tail = node;
-        node->prev = node->next = NULL;
     }
     else
     {
-        node->prev = list->tail;
-        node->next = NULL;
         list->tail->next = node;
         list->tail = node;
     }
@@ -373,27 +364,21 @@ static int hm_list_add_tail(himysql_t *hm, const void *value, size_t size)
     return ret;
 }
 
-static void list_del_node(list *list, list_node *node)
+static void list_del_head(list *list)
 {
-    if (node->prev)
-        node->prev->next = node->next;
-    else
-        list->head = node->next;
-    if (node->next)
-        node->next->prev = node->prev;
-    else
-        list->tail = node->prev;
+    list_node *node = list->head;
+    list->head = node->next;
 
     list->len -= 1;
     list->size -= node->size;
     free(node);
 }
 
-static void hm_list_del_node(himysql_t *hm, list_node *node)
+static void hm_list_del_head(himysql_t *hm)
 {
     list *list = hm->list;
     pthread_mutex_lock(&list->lock);
-    list_del_node(list, node);
+    list_del_head(list);
     pthread_mutex_unlock(&list->lock);
 }
 
@@ -418,7 +403,7 @@ static void hm_exec_list(himysql_t *hm, int sleep)
                 if (fail_cb)
                     fail_cb(hm);
 
-                hm_list_del_node(hm, head);
+                hm_list_del_head(hm);
             }
         }
         else
@@ -430,7 +415,7 @@ static void hm_exec_list(himysql_t *hm, int sleep)
                     mysql_free_result(result);
             }
 
-            hm_list_del_node(hm, head);
+            hm_list_del_head(hm);
         }
     }
 }
@@ -597,48 +582,31 @@ int himysql_set_list_max(himysql_t *hm, size_t max)
 
 static int hm_exec(himysql_t *hm, const char *sql, size_t len)
 {
-    himysql_fail_cb *fail_cb = hm->fail_cb;
-
-    int i, ret;
-    for (i = 0; i < 2; ++i)
+    int ret = mysql_real_query(hm->conn, sql, len);
+    if (ret != 0)
     {
-        ret = mysql_real_query(hm->conn, sql, len);
-        if (ret != 0)
+        himysql_fail_cb *fail_cb = hm->fail_cb;
+
+        unsigned errcode = mysql_errno(hm->conn);
+        if (
+                errcode == CR_SERVER_LOST       ||  /* 2013 */
+                errcode == CR_SERVER_GONE_ERROR ||  /* 2006 */
+                errcode == CR_CONNECTION_ERROR  ||  /* 2002 */
+                errcode == CR_CONN_HOST_ERROR   ||  /* 2003 */
+                errcode == ER_SERVER_SHUTDOWN   ||  /* 1053 */
+                errcode == ER_QUERY_INTERRUPTED)    /* 1317 */
         {
-            unsigned errcode = mysql_errno(hm->conn);
-            if (i == 0 && ( \
-                        errcode == CR_SERVER_LOST       ||  /* 2013 */
-                        errcode == CR_SERVER_GONE_ERROR ||  /* 2006 */
-                        errcode == CR_CONNECTION_ERROR  ||  /* 2002 */
-                        errcode == CR_CONN_HOST_ERROR   ||  /* 2003 */
-                        errcode == ER_SERVER_SHUTDOWN))     /* 1053 */
-            {
-                /* Try reconnect */
-                mysql_close(hm->conn);
+            if (!hm->use_thread && fail_cb)
+                fail_cb(hm);
 
-                if (hm_connect(hm) == HM_OK)
-                {
-                    continue;
-                }
-                else
-                {
-                    if (fail_cb)
-                        fail_cb(hm);
-
-                    return HM_LOST;
-                }
-            }
-            else
-            {
-                if (fail_cb)
-                    fail_cb(hm);
-
-                return HM_ERROR;
-            }
+            return HM_LOST;
         }
         else
         {
-            break;
+            if (fail_cb)
+                fail_cb(hm);
+
+            return HM_ERROR;
         }
     }
 

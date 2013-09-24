@@ -12,8 +12,6 @@ struct himysql
     size_t      buf_size;
     char        *sql;
     size_t      len;
-    int         connect_stat;
-    time_t      disconnect_time;
 
     char        *host;
     int         port;
