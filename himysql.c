@@ -17,6 +17,7 @@
 # define HM_LIST_MAX_DEFAULT (100 * MB)
 
 static int hm_exec(himysql_t *hm, const char *sql, size_t len);
+static void hm_fini(himysql_t *hm);
 
 static int hm_expand_buf(himysql_t *hm, size_t size)
 {
@@ -551,12 +552,15 @@ himysql_t *himysql_init(const char *host, int port, const char *db,
 
     if (hm->use_thread)
     {
+        pthread_mutex_init(&hm->lock, NULL);
+
         if ((hm->list = calloc(1, sizeof(list))) == NULL)
         {
             mysql_close(hm->conn);
             hm_free(hm);
             return NULL;
         }
+        pthread_mutex_init(&((list *)hm->list)->lock, NULL);
         hm->list_max = HM_LIST_MAX_DEFAULT;
 
         if (pipe(hm->pipefd) != 0)
@@ -569,10 +573,7 @@ himysql_t *himysql_init(const char *host, int port, const char *db,
         hm->running = 1;
         if (pthread_create(&hm->thread, NULL, hm_thread_routine, hm) < 0)
         {
-            mysql_close(hm->conn);
-            close(hm->pipefd[0]);
-            close(hm->pipefd[1]);
-            hm_free(hm);
+            hm_fini(hm);
             return NULL;
         }
     }
@@ -612,7 +613,7 @@ static int hm_exec(himysql_t *hm, const char *sql, size_t len)
                         errcode == CR_CONN_HOST_ERROR   ||  /* 2003 */
                         errcode == ER_SERVER_SHUTDOWN))     /* 1053 */
             {
-                /* try reconnect here */
+                /* Try reconnect */
                 mysql_close(hm->conn);
 
                 if (hm_connect(hm) == HM_OK)
@@ -705,7 +706,7 @@ int himysql_query(himysql_t *hm, const char *sql, size_t len)
 
 char *himysql_error(himysql_t *hm)
 {
-    if (hm->conn)
+    if (hm && hm->conn)
         return (char *)mysql_error(hm->conn);
 
     return "";
@@ -713,7 +714,7 @@ char *himysql_error(himysql_t *hm)
 
 unsigned int himysql_errno(himysql_t *hm)
 {
-    if (hm->conn)
+    if (hm && hm->conn)
         return mysql_errno(hm->conn);
 
     return 0;
@@ -757,6 +758,11 @@ static void hm_fini(himysql_t *hm)
 {
     himysql_free_result(hm);
     mysql_close(hm->conn);
+    if (hm->use_thread)
+    {
+        close(hm->pipefd[0]);
+        close(hm->pipefd[1]);
+    }
     hm_free(hm);
 }
 
