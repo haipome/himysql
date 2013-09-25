@@ -6,7 +6,11 @@ A mysql c client wrapper, support auto connect and asynchronous write.
 API
 ---
 
-It uses an high level printf-alike API int order to make it much easier to write sql statement. It is binary safe, and auto escape string.
+It uses an high level printf-alike API int order to make it much easier to write sql statement. It support binary data, and auto escape string.
+
+```
+    CREATE TABLE user (name varchar(100), age int, addr blob(100));
+```
 
 ```c
     himysql(c, "insert into user (name, age, addr) values (%s, %d, %b)", \
