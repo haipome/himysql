@@ -636,7 +636,7 @@ static int hm_sql(himysql_t *hm, const char *sql, size_t len)
         {
             hm->num_fields = mysql_num_fields(hm->result);
             hm->num_rows = mysql_num_rows(hm->result);
-            hm->num_affected = mysql_affected_rows(r->conn);
+            hm->num_affected = mysql_affected_rows(hm->conn);
         }
     }
 
