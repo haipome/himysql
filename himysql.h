@@ -30,10 +30,11 @@ struct himysql
     MYSQL_RES   *result;
     size_t      num_fields;
     size_t      num_rows;
+    long        num_affected;
     MYSQL_FIELD *fields;
     MYSQL_ROW   row;
-    void        *fail_cb;
 
+    void        *fail_cb;
     pthread_mutex_t lock;
 };
 
