@@ -19,12 +19,11 @@ void fail_callback(himysql_t *hm)
 
 int main()
 {
-    himysql_t *hm = himysql_init("localhost", 0, "test", "root", "shit", NULL, HM_USE_THREAD);
+    himysql_t *hm = himysql_init("localhost", 0, NULL, "root", "123456", NULL);
     if (hm == NULL)
-        error(1, 0, "himysql_init fail");
+        error(1, 0, "himysql_init fail: %s");
     himysql_set_fail_cb(hm, fail_callback);
 
-    /*
     if (himysql(hm, "show databases") != HM_OK)
         error(1, errno, "himysql fail: %s", himysql_error(hm));
 
@@ -35,23 +34,7 @@ int main()
         printf("%d: %s\n", i, hm->row[0]);
     }
 
-    if (himysql(hm, "insert into t values (%d, %s, %b), (%d, %s, %b)", \
-                22, "damonyang", "hello", (size_t)5, \
-                23, "marvin", "world", (size_t)5) != HM_OK)
-        error(1, errno, "himysql fail: %s", himysql_error(hm));
-
     himysql_fini(hm);
-    */
-
-    int i;
-    for (i = 0; i < 300; ++i)
-    {
-        if (himysql(hm, "insert into time (id, time) values (%d, %ld)", \
-                    i + 1, time(NULL)) != HM_OK)
-            error(1, errno, "himysql fail: %s", himysql_error(hm));
-
-        usleep(200 * 1000);
-    }
 
     return 0;
 }

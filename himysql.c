@@ -14,7 +14,6 @@
 # define MB 1024 * KB
 
 # define HM_BUF_SIZE_INIT (64 * KB)
-# define HM_LIST_MAX_DEFAULT (100 * MB)
 
 static int hm_exec(himysql_t *hm, const char *sql, size_t len);
 static void hm_fini(himysql_t *hm);
@@ -310,148 +309,6 @@ fmt_valid_lable:
     return HM_OK;
 }
 
-typedef struct list_node
-{
-    struct list_node *next;
-    size_t size;
-    char value[];
-} list_node;
-
-typedef struct list
-{
-    pthread_mutex_t lock;
-    list_node *head;
-    list_node *tail;
-    size_t len;
-    size_t size;
-} list;
-
-static int list_add_tail(list *list, const void *value, size_t size, size_t max)
-{
-    if (list->len >= 1 && (list->size + size) > max)
-        return HM_ERROR;
-
-    list_node *node = malloc(sizeof(list_node) + size);
-    if (node == NULL)
-        return HM_ERROR;
-
-    node->next = NULL;
-    node->size = size;
-    memcpy(node->value, value, size);
-
-    if (list->len == 0)
-    {
-        list->head = list->tail = node;
-    }
-    else
-    {
-        list->tail->next = node;
-        list->tail = node;
-    }
-    list->len += 1;
-    list->size += size;
-
-    return HM_OK;
-}
-
-static int hm_list_add_tail(himysql_t *hm, const void *value, size_t size)
-{
-    list *list = hm->list;
-    pthread_mutex_lock(&list->lock);
-    int ret = list_add_tail(list, value, size, hm->list_max);
-    pthread_mutex_unlock(&list->lock);
-
-    return ret;
-}
-
-static void list_del_head(list *list)
-{
-    list_node *node = list->head;
-    list->head = node->next;
-
-    list->len -= 1;
-    list->size -= node->size;
-    free(node);
-}
-
-static void hm_list_del_head(himysql_t *hm)
-{
-    list *list = hm->list;
-    pthread_mutex_lock(&list->lock);
-    list_del_head(list);
-    pthread_mutex_unlock(&list->lock);
-}
-
-static void hm_exec_list(himysql_t *hm, int sleep)
-{
-    himysql_fail_cb *fail_cb = hm->fail_cb;
-
-    list *list = hm->list;
-    list_node *head;
-    while (list->len)
-    {
-        head = list->head;
-        int ret = hm_exec(hm, head->value, head->size);
-        if (ret == HM_LOST)
-        {
-            if (sleep)
-            {
-                usleep(100 * 1000);
-            }
-            else
-            {
-                if (fail_cb)
-                    fail_cb(hm);
-
-                hm_list_del_head(hm);
-            }
-        }
-        else
-        {
-            if (ret == HM_OK)
-            {
-                MYSQL_RES *result = mysql_store_result(hm->conn);
-                if (result)
-                    mysql_free_result(result);
-            }
-
-            hm_list_del_head(hm);
-        }
-    }
-}
-
-static void hm_thread_loop(himysql_t *hm)
-{
-    fd_set r_set;
-    FD_ZERO(&r_set);
-    FD_SET(hm->pipefd[0], &r_set);
-
-    struct timeval timeout = { 0, 100 * 1000 };
-
-    int ret = select(hm->pipefd[0] + 1, &r_set, NULL, NULL, &timeout);
-    if (ret > 0 && FD_ISSET(hm->pipefd[0], &r_set))
-    {
-        char c;
-        if (read(hm->pipefd[0], &c, 1) != 1) ;
-    }
-
-    hm_exec_list(hm, 1);
-}
-
-static void *hm_thread_routine(void *arg)
-{
-    himysql_t *hm = (himysql_t *)arg;
-
-    while (hm->running)
-    {
-        hm_thread_loop(hm);
-    }
-
-    hm_exec_list(hm, 0);
-
-    return NULL;
-}
-
 static void hm_free(himysql_t *hm)
 {
     free(hm->host);
@@ -493,8 +350,7 @@ static int hm_connect(himysql_t *hm)
     return HM_OK;
 }
 
-himysql_t *himysql_init(const char *host, int port, const char *db,
-        const char *user, const char *passwd, const char *charset, int flag)
+himysql_t *himysql_init(const char *host, int port, const char *db, const char *user, const char *passwd, const char *charset)
 {
     himysql_t *hm;
     if ((hm = calloc(1, sizeof(himysql_t))) == NULL)
@@ -525,42 +381,10 @@ himysql_t *himysql_init(const char *host, int port, const char *db,
         hm_free(hm);
         return NULL;
     }
-
     if (hm_connect(hm) != HM_OK)
     {
         hm_free(hm);
         return NULL;
-    }
-
-    if (flag & HM_USE_THREAD)
-        hm->use_thread = 1;
-
-    if (hm->use_thread)
-    {
-        pthread_mutex_init(&hm->lock, NULL);
-
-        if ((hm->list = calloc(1, sizeof(list))) == NULL)
-        {
-            mysql_close(hm->conn);
-            hm_free(hm);
-            return NULL;
-        }
-        pthread_mutex_init(&((list *)hm->list)->lock, NULL);
-        hm->list_max = HM_LIST_MAX_DEFAULT;
-
-        if (pipe(hm->pipefd) != 0)
-        {
-            mysql_close(hm->conn);
-            hm_free(hm);
-            return NULL;
-        }
-
-        hm->running = 1;
-        if (pthread_create(&hm->thread, NULL, hm_thread_routine, hm) < 0)
-        {
-            hm_fini(hm);
-            return NULL;
-        }
     }
 
     return hm;
@@ -569,14 +393,6 @@ himysql_t *himysql_init(const char *host, int port, const char *db,
 int himysql_set_fail_cb(himysql_t *hm, himysql_fail_cb *cb)
 {
     hm->fail_cb = (void *)cb;
-
-    return HM_OK;
-}
-
-int himysql_set_list_max(himysql_t *hm, size_t max)
-{
-    hm->list_max = max;
-
     return HM_OK;
 }
 
@@ -586,7 +402,6 @@ static int hm_exec(himysql_t *hm, const char *sql, size_t len)
     if (ret != 0)
     {
         himysql_fail_cb *fail_cb = hm->fail_cb;
-
         unsigned errcode = mysql_errno(hm->conn);
         if (
                 errcode == CR_SERVER_LOST       ||  /* 2013 */
@@ -596,16 +411,14 @@ static int hm_exec(himysql_t *hm, const char *sql, size_t len)
                 errcode == ER_SERVER_SHUTDOWN   ||  /* 1053 */
                 errcode == ER_QUERY_INTERRUPTED)    /* 1317 */
         {
-            if (!hm->use_thread && fail_cb)
+            if (fail_cb)
                 fail_cb(hm);
-
             return HM_LOST;
         }
         else
         {
             if (fail_cb)
                 fail_cb(hm);
-
             return HM_ERROR;
         }
     }
@@ -615,55 +428,36 @@ static int hm_exec(himysql_t *hm, const char *sql, size_t len)
 
 static int hm_sql(himysql_t *hm, const char *sql, size_t len)
 {
-    if (hm->use_thread)
-    {
-        int ret = hm_list_add_tail(hm, sql, len);
-        if (ret != HM_OK)
-            return ret;
+	int ret = hm_exec(hm, sql, len);
+	if (ret != HM_OK)
+		return ret;
 
-        write(hm->pipefd[1], "", 1);
-    }
-    else
-    {
-        int ret = hm_exec(hm, sql, len);
-        if (ret != HM_OK)
-            return ret;
+	himysql_free_result(hm);
+	hm->result = mysql_store_result(hm->conn);
+	if (hm->result)
+	{
+		hm->num_fields = mysql_num_fields(hm->result);
+		hm->num_rows = mysql_num_rows(hm->result);
+		hm->num_affected = mysql_affected_rows(hm->conn);
+	}
 
-        himysql_free_result(hm);
-
-        hm->result = mysql_store_result(hm->conn);
-        if (hm->result)
-        {
-            hm->num_fields = mysql_num_fields(hm->result);
-            hm->num_rows = mysql_num_rows(hm->result);
-            hm->num_affected = mysql_affected_rows(hm->conn);
-        }
-    }
-
-    return HM_OK;
+	return HM_OK;
 }
 
-static int _himysql(himysql_t *hm, const char *format, va_list ap)
+static int inner_himysql(himysql_t *hm, const char *format, va_list ap)
 {
-    int ret = hm_format_sql(hm, format, ap);
+	int ret = hm_format_sql(hm, format, ap);
     if (ret != HM_OK)
         return HM_ERROR;
-
     return hm_sql(hm, hm->sql, hm->len);
 }
 
 int himysql(himysql_t *hm, const char *format, ...)
 {
-    if (hm->use_thread)
-        pthread_mutex_lock(&hm->lock);
-
     va_list ap;
     va_start(ap, format);
-    int ret = _himysql(hm, format, ap);
+    int ret = inner_himysql(hm, format, ap);
     va_end(ap);
-
-    if (hm->use_thread)
-        pthread_mutex_unlock(&hm->lock);
 
     return ret;
 }
@@ -677,7 +471,6 @@ char *himysql_error(himysql_t *hm)
 {
     if (hm && hm->conn)
         return (char *)mysql_error(hm->conn);
-
     return "";
 }
 
@@ -685,7 +478,6 @@ unsigned int himysql_errno(himysql_t *hm)
 {
     if (hm && hm->conn)
         return mysql_errno(hm->conn);
-
     return 0;
 }
 
@@ -728,11 +520,6 @@ static void hm_fini(himysql_t *hm)
 {
     himysql_free_result(hm);
     mysql_close(hm->conn);
-    if (hm->use_thread)
-    {
-        close(hm->pipefd[0]);
-        close(hm->pipefd[1]);
-    }
     hm_free(hm);
 }
 
@@ -740,14 +527,6 @@ void himysql_fini(himysql_t *hm)
 {
     if (hm == NULL)
         return;
-
-    if (hm->use_thread)
-    {
-        hm->running = 0;
-        write(hm->pipefd[1], "", 1);
-        pthread_join(hm->thread, NULL);
-    }
-
     hm_fini(hm);
 }
 
